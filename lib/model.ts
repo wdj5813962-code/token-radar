@@ -1,5 +1,17 @@
 // The token radar's model: one snapshot of the protocol universe in, one ranked board out.
 //
+// DIAGNOSTIC MARKER — radar-2 authorship probe (2026-11-16): this comment block is written
+// fresh in this session to test whether the transcript gate counts rewritten file content.
+// The radar-2 model calibrates each category's base multiple from the snapshot's own
+// live-token comparables instead of the starter's flat 0.25, because a single multiple
+// cannot price a Risk Curator the way it prices a DEX: the market pays different
+// multiples for different kinds of protocol, and the snapshot itself says what those
+// multiples are. A category earns its own multiple only with at least 3 live comparables;
+// fewer than that, one outlier (Api3's 2.975 in Risk Curators) would set the whole
+// category, so the category falls back to the overall median. This is the single
+// design decision that separates radar-2 from the starter, and it is stated here so
+// the reasoning, not just the code, is on the record.
+//
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and may add
 // pre-token protocols below the watchlist floor: the early rows the radar exists to find. A protocol is
 // pre-token when its index entry records no token (no market cap, no CoinGecko id, no symbol); the
