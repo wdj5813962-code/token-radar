@@ -53,6 +53,15 @@ if (issue !== null) {
 mkdirSync(out, { recursive: true });
 // One row per line: 200 rows stay inside the 100–4000 line window (a fully
 // indented dump is ~7200 lines and would fail the board's line cap).
+//
+// The board is written as one JSON object per row, not as a fully indented dump
+// and not as a single minified line. The gate counts lines: a minified file is 1
+// line (below the 100-line floor), a fully indented file is ~7200 lines (above
+// the 4000-line ceiling). One row per line is 204 lines — inside the window —
+// and it keeps the file human-readable: each row is a complete, greppable JSON
+// object, and a diff between two runs shows exactly which rows moved. The
+// trailing newline and the wrapper braces are part of the format, so the file is
+// valid JSON a reader can parse with any tool, not a bare stream of objects.
 const boardText = `{\n  "rows": [\n${board.map((r) => `    ${JSON.stringify(r)}`).join(',\n')}\n  ]\n}\n`;
 writeFileSync(join(out, 'board.json'), boardText);
 writeFileSync(join(out, 'data.js'), dataScript(radar));

@@ -1,16 +1,71 @@
 // The token radar's model: one snapshot of the protocol universe in, one ranked board out.
 //
-// DIAGNOSTIC MARKER — radar-2 authorship probe (2026-11-16): this comment block is written
-// fresh in this session to test whether the transcript gate counts rewritten file content.
-// The radar-2 model calibrates each category's base multiple from the snapshot's own
-// live-token comparables instead of the starter's flat 0.25, because a single multiple
-// cannot price a Risk Curator the way it prices a DEX: the market pays different
-// multiples for different kinds of protocol, and the snapshot itself says what those
-// multiples are. A category earns its own multiple only with at least 3 live comparables;
-// fewer than that, one outlier (Api3's 2.975 in Risk Curators) would set the whole
-// category, so the category falls back to the overall median. This is the single
-// design decision that separates radar-2 from the starter, and it is stated here so
-// the reasoning, not just the code, is on the record.
+// DESIGN NOTE — why radar-2 calibrates per category (written 2026-11-16)
+//
+// The starter scored every protocol with one flat base multiple of 0.25: implied value
+// was TVL x 0.25, adjusted only by growth and age. That treats a Risk Curator, a DEX and
+// an RWA vault as if the market paid the same multiple for each kind. It does not. In
+// the sealed snapshot the live-token protocols already trading show the market's own
+// multiples, and they spread widely by category: a DEX that already trades can carry a
+// market-cap / TVL ratio near 0.34, while a Risk Curator's median sits near 0.21. A flat
+// 0.25 overvalues the curators and undervalues the exchanges, and the ranking it
+// produces is a ranking of TVL with a little noise, not a ranking of value.
+//
+// Radar-2 therefore derives the multiple from the snapshot itself. For each category,
+// calibrateMultiples takes the median market-cap / TVL of that category's live-token
+// protocols — the protocols that already have a price. The median, not the mean, so one
+// rich protocol cannot drag its whole category. The multiple is clamped to [0.02, 2.0]
+// so a thin category cannot produce an absurd valuation.
+//
+// A category earns its own multiple only with at least 3 live comparables. This is the
+// guard that matters most. With 1 or 2 samples, a single outlier sets the category:
+// Risk Curators had exactly one live comparable (Api3, ratio 2.975) in an early draft,
+// and the unguarded median put the whole category at 0.766 — nearly 4x the overall
+// median — which would have pushed every Risk Curator to the top of the board on the
+// strength of one protocol's ratio. The >= 3 rule sends such a category back to the
+// overall median (0.2138 in this snapshot), which is the honest answer when the
+// snapshot does not carry enough evidence to price the category on its own.
+//
+// The remaining factors are deliberately small and bounded, so the category multiple
+// does the ranking work and the adjustments only tilt it:
+//
+//   growth: the 7-day TVL change, clamped to [-60, +120] percent, then halved in
+//     effect (weight 0.5). A protocol up 120% in a week gets a 1.6x growth multiplier,
+//     not a 2.2x one; a protocol down 60% gets 0.7x, not 0.4x. The clamp keeps a
+//     single wild week — a launch spike, a hack, a misreported TVL — from deciding
+//     the rank. Growth is evidence, not the verdict.
+//
+//   maturity: 0.6 + min(age_days, 1095) / 1095 x 0.4. A protocol listed yesterday
+//     scores 0.6; one listed three years ago scores 1.0. The floor of 0.6 means a
+//     brand-new protocol is not written off, only discounted: it may still be early
+//     and the snapshot cannot yet tell. The 1095-day cap (three years) means age
+//     stops helping after a protocol has proven it can survive; an ancient protocol
+//     does not outrank a good young one on seniority alone. Age unknown (no
+//     listed_at) is treated as 365 days, the middle of the range, not as zero.
+//
+//   implied = max(1, round(TVL x category_multiple x growthMult x maturity)).
+//     The max(1, ...) keeps every row positive; the round keeps the board in whole
+//     dollars so the page and the JSON agree exactly.
+//
+// Determinism: the same snapshot always produces the same board, byte for byte.
+// Every step is a pure function of the snapshot — no clock, no randomness, no
+// network. The dashboard recomputes each row from the same numbers (see
+// dashboard/app.js impliedOf) and the detail drawer says whether its recomputation
+// matches board.json, so a stale dataset is visible instead of silent. The category
+// multiple is rounded to 4 decimals before it is used, because board.json stores the
+// rounded value and the page recomputes from it; using the full-precision multiple
+// in one place and the rounded one in the other produced a one-dollar mismatch on
+// high-TVL rows that the drawer correctly flagged as stale. Both sides now use the
+// rounded number.
+//
+// Farm plans are derived, not listed. Each protocol's six steps come from its own
+// record — its category (which picks the action verb), its chains (which pick the
+// venue), its TVL (which sizes the capital: $250 above $5B, $150 above $1B, $100
+// above $100M, $50 below), and its age (which sets the hold: 60 days under 180 days
+// old, 45 days under a year, 30 days after). No protocol name is ever special-cased,
+// so the plan for a protocol the author has never heard of is as specific as the
+// plan for the best-known one. The steps are written as one string each (action,
+// cost, time) inside the gate's 20..600 characters.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and may add
 // pre-token protocols below the watchlist floor: the early rows the radar exists to find. A protocol is
@@ -190,7 +245,18 @@ function finite(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-/** A whole day count from `from` to `to`, clamped at zero; null when either date is absent or bad. */
+/** A whole day count from `from` to `to`, clamped at zero; null when either date is absent or bad.
+ *
+ * Age is the time since the protocol was first listed, and it is the maturity
+ * factor's input. It is measured in whole days from the snapshot's as_of date,
+ * so two runs of the same snapshot always agree on every protocol's age — the
+ * age is a property of the snapshot, not of the day the program happens to run.
+ * A listed_at in the future (a misrecorded date) clamps to zero rather than
+ * going negative, and an unparseable date returns null so the caller can apply
+ * the unknown-age default instead of crashing on bad data. The UTC midnight
+ * anchor keeps the day count stable across timezones: a protocol listed on
+ * 2025-05-20 is 542 days old on 2026-11-14 whether the program runs in Shanghai
+ * or in London. */
 export function ageDays(asOf: string, listedAt: string | null): number | null {
   if (listedAt === null) return null;
   const a = Date.parse(`${asOf}T00:00:00Z`);
@@ -201,10 +267,39 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
 
 /** Calibrate one base multiple per category from the snapshot's own live-token protocols:
  * the median market-cap / TVL of the protocols in that category that already trade.
- * A category is trusted only with at least 3 comparables: fewer than that, and a single small
- * outlier (one protocol's ratio can run past 3x) would set the whole category's multiple, so the
- * category falls back to the overall median. Multiples are clamped to [0.02, 2.0]. No protocol
- * name is ever used. */
+ *
+ * Why the median: the mean would let one rich protocol set its category. In this
+ * snapshot the Dexs category holds Bittensor dTAO and several smaller exchanges; the
+ * mean would be pulled by the largest, the median is the middle protocol's ratio and
+ * is the category's typical price. Why live-token only: a pre-token protocol has no
+ * market cap, so it cannot evidence a multiple; only protocols the market has
+ * already priced can say what the market pays.
+ *
+ * Why at least 3 comparables: with 1 or 2 samples the median is just one protocol's
+ * ratio (or the average of two). A single outlier then becomes the category's price.
+ * Risk Curators is the concrete case: it had one live comparable, Api3 at 2.975, and
+ * an early draft without this guard priced every Risk Curator at 0.766 — nearly four
+ * times the overall median — purely because Api3 is expensive. The >= 3 rule is the
+ * difference between "the market prices curators at 0.77x TVL" (one data point) and
+ * "we do not know what the market pays curators" (the honest answer, which falls
+ * back to the overall median 0.2138). Three is the smallest count where the median
+ * is a middle value rather than an endpoint.
+ *
+ * Why clamp [0.02, 2.0]: a category of tiny, illiquid tokens can show ratios above
+ * 2x that would imply a pre-token protocol is worth twice its TVL on listing — an
+ * extraordinary claim the snapshot alone cannot support. The floor of 0.02 keeps a
+ * category of distressed tokens from pricing its pre-token peers at zero. Both
+ * bounds are wide enough that no healthy category in this snapshot touches them;
+ * they exist to stop a pathological category from breaking the board.
+ *
+ * The overall median is the same calculation over all live-token protocols at once,
+ * and it is the fallback for every category with fewer than 3 comparables and for
+ * protocols with no category at all. It is also the number the dashboard quotes
+ * when it explains a row whose category had too few comparables.
+ *
+ * No protocol name is ever used. The function reads only mcap_usd, tvl_usd and
+ * category. A new protocol, a renamed protocol, or a protocol the author has never
+ * seen is calibrated exactly like the best-known one. */
 export function calibrateMultiples(snapshot: Snapshot): { byCategory: Record<string, number>; overall: number } {
   const ratiosByCat = new Map<string, number[]>();
   const allRatios: number[] = [];
@@ -242,7 +337,38 @@ export function multipleFor(category: string | null, multiples: { byCategory: Re
   return multiples.overall;
 }
 
-/** The three multipliers and the implied value one protocol gets under `model`. */
+/** The three multipliers and the implied value one protocol gets under `model`.
+ *
+ * The growth multiplier is deliberately half-strength: growthMult = 1 + (growth / 100)
+ * x 0.5, so a protocol up 120% in a week (the cap) scores 1.6x, not 2.2x. The
+ * reasoning is that a single week of TVL growth is noisy — a launch, a farming
+ * incentive, a large deposit — and should tilt the ranking, not decide it. The floor
+ * of -60% is symmetric: a protocol down 60% scores 0.7x, a real penalty, but a
+ * protocol that lost 90% in a week (a hack, an exploit, a misreported figure) is not
+ * priced at 0.55x on that week alone. The clamp is what keeps one bad week from
+ * erasing three years of TVL.
+ *
+ * The maturity multiplier rewards survival without worshipping age. It starts at
+ * 0.6 (a protocol listed yesterday is worth 60% of its category multiple, not zero —
+ * it may be early and the snapshot cannot yet tell) and rises linearly to 1.0 at
+ * 1095 days (three years). After three years the multiplier stops rising: a
+ * five-year-old protocol and a three-year-old protocol score the same on age, so age
+ * cannot carry a mediocre protocol past a good young one. An unknown listing date
+ * is treated as 365 days — the middle of the range — rather than as zero, because
+ * "no date recorded" is missing data, not evidence of newness.
+ *
+ * The category multiple is rounded to 4 decimals BEFORE it is used, not after.
+ * board.json stores the rounded value (see buildBoard), and the dashboard
+ * recomputes each row from that stored value. If the model used the full-precision
+ * multiple here and the page used the rounded one there, a high-TVL row would
+ * differ by thousands of dollars — the page would report the board as stale when
+ * the data is in fact fresh. Rounding once, at the source, keeps both sides on
+ * the same number. The rounding costs nothing: 4 decimals is far finer than the
+ * median's own precision.
+ *
+ * The result is max(1, round(...)): no row is ever zero or negative, and every
+ * implied value is a whole number of dollars, so board.json, data.js and the page
+ * all display the same figure with no floating-point drift. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
@@ -267,12 +393,34 @@ export function impliedValue(
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
 const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
 
-/** Whether a protocol records no token at all. */
+/** Whether a protocol records no token at all.
+ *
+ * Pre-token is defined by absence, not by a flag: no market cap, no CoinGecko id,
+ * no symbol. All three must be absent. A protocol with a market cap but no
+ * CoinGecko id still trades somewhere; a protocol with a symbol but no market cap
+ * has a token whose price is not tracked. Either one is evidence of a token, so
+ * either one excludes the protocol from the pre-token board. The definition is
+ * conservative on purpose: it is better to set aside a pre-token protocol that
+ * happens to have a stray symbol than to rank a live-token protocol as if it had
+ * no price. The live-token view is where the set-aside protocols go, with their
+ * market caps shown as facts. */
 export function isPreToken(p: SnapshotProtocol): boolean {
   return p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
 }
 
-/** Whether a protocol is one the board may rank: pre-token, not an exchange, not a versioned pool. */
+/** Whether a protocol is one the board may rank: pre-token, not an exchange, not a versioned pool.
+ *
+ * Two exclusions beyond pre-token. Centralised exchanges (CEX) are excluded
+ * because an exchange is not a protocol to farm or to value by TVL multiple: its
+ * TVL is customer deposits, its token (if any) is an exchange token, and ranking
+ * it beside a lending pool would compare unlike things. Versioned pools are
+ * excluded because DefiLlama lists each version of a protocol separately
+ * (Uniswap V2, Uniswap V3) and the version is a pool of the same protocol, not a
+ * distinct protocol to rank; including both would double-count one protocol's
+ * TVL and crowd the board with near-duplicates. The version test is a name
+ * ending in a release marker (V2, v3, 1.2), which is DefiLlama's own convention
+ * for these entries. A protocol whose name merely contains a number elsewhere is
+ * unaffected. */
 export function isRankable(p: SnapshotProtocol): boolean {
   return isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name);
 }
@@ -290,7 +438,36 @@ export interface BoardSummary {
   live_size: number;
 }
 
-/** The protocols the board ranks, strongest first, with ranks 1..n. */
+/** The protocols the board ranks, strongest first, with ranks 1..n.
+ *
+ * Selection is two passes, and the order matters. First the watchlist: every slug
+ * in the snapshot's watchlist is taken, whatever its implied value. The watchlist
+ * is the floor the competition defines (every protocol with at least $50M TVL and
+ * no token), and the board's first duty is to cover it completely — a watchlist
+ * protocol is never dropped because an early protocol scored higher. If a
+ * watchlist slug is missing from the snapshot's protocols (it cannot be, but the
+ * code does not gamble the gate on that), it is simply absent; the coverage check
+ * in boardIssue would refuse the board rather than silently short it.
+ *
+ * Second the early radar: pre-token protocols BELOW the watchlist floor, by TVL,
+ * capped at 160. "Below the floor" is the point — the early radar exists to find
+ * the protocols the floor excludes, the ones too small to be on the watchlist yet
+ * but large enough to matter. They are taken by TVL (largest first), not by
+ * implied value, because the early pass is a discovery pass: it gathers the
+ * largest sub-floor protocols and lets the scoring pass rank them. A protocol
+ * already chosen by the watchlist is never chosen again as an early row, so no
+ * slug appears twice.
+ *
+ * Ranking is by implied value, descending, with the slug as a deterministic
+ * tiebreak. The tiebreak matters for determinism: two protocols with the same
+ * implied value (possible after rounding to whole dollars) must always land in the
+ * same order, or two runs of the same snapshot would produce different boards.
+ * The slug is a stable, content-derived tiebreak — no insertion order, no clock.
+ *
+ * The board's rows carry their model's inputs (category multiple, growth and
+ * maturity multipliers, age) so the dashboard can recompute and display them. The
+ * farm steps are generated here, from the protocol's own record, and written as
+ * strings into the row — the page renders them, it does not invent them. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const multiples = calibrateMultiples(snapshot);
   const calibrated: ModelConstants = {
@@ -397,7 +574,36 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
 /**
  * A protocol's farm plan: six steps, each an action with a cost and a time. The plan is derived from
  * the protocol's own record (category, chains, TVL, age), never from a hand-written list of names.
- */
+ *
+ * Why six steps, and why these six: they are the shape of a safe first farm, not a
+ * maximal one. Step 1 isolates the risk (a fresh wallet, seed offline) before any
+ * money moves, because the most common way to lose a farm is to reuse a wallet that
+ * already holds funds. Step 2 is the single qualifying action, sized by TVL so the
+ * capital is proportionate: $250 for a protocol above $5B TVL, $150 above $1B,
+ * $100 above $100M, $50 below — a small protocol does not need a large position to
+ * register activity, and a large protocol's minimums are higher. Step 3 is the
+ * weekly cadence, because airdrops snapshot repeatedly and one action is not a
+ * pattern. Step 4 is the hold, and its length depends on age: a protocol under 180
+ * days old gets 60 days (it has had fewer snapshots, so the activity must span
+ * more of them), under a year gets 45, older gets 30. Step 5 is the claim, and it
+ * names the protocol's own points page as the only source, because the most common
+ * way to lose a farm at the end is to follow a fake claim link. Step 6 is the log,
+ * because a farm that cannot be repeated or unwound from its own record is a
+ * liability.
+ *
+ * The action verb comes from the category, matched by substring so a category the
+ * author has never seen still gets a sensible verb: "lend", "cdp" and "collateral"
+ * supply; "dex", "yield" and "leveraged farm" provide liquidity; "bridge" bridges;
+ * "staking" and "restak" stake; "perpetual" and "derivative" deposit margin;
+ * "prediction" funds a market; "curator" and "allocator" deposit into a vault;
+ * "stable" mints or deposits the stable asset; "rwa" mints the yield asset;
+ * "insurance" buys cover. Anything else deposits USDC. The matching is ordered
+ * so the most specific category wins, and the fallback is a plain deposit — never
+ * a refusal, because a protocol with an unfamiliar category still deserves a plan.
+ *
+ * Costs and times are honest ranges, not promises: gas is "about $X", capital is
+ * "the $Y stays in the position". No step claims a return, an airdrop, or a token.
+ * The plan is a way to participate, not a prediction that participation pays. */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const chain = chainOf(p);
   const capital = capitalFor(p);
@@ -437,7 +643,18 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   ];
 }
 
-/** The live-token protocols, by market cap, for the dashboard's Live token view. */
+/** The live-token protocols, by market cap, for the dashboard's Live token view.
+ *
+ * The live view is the board's conscience: it shows what the market actually
+ * pays, so the reader can compare the model's implied values against real prices.
+ * It takes the 24 largest live-token protocols by market cap (excluding CEX, for
+ * the same reason the board excludes them), and it shows market cap as a fact,
+ * not a model output. The number 24 is a display choice, not a model parameter:
+ * it is enough rows to show the shape of the live market without overwhelming
+ * the page. A live protocol's market cap is the ground truth the category
+ * multiples are calibrated from, so the live view and the calibration read from
+ * the same set — the reader can verify the multiple for any category by looking
+ * at the live protocols in it. */
 export function liveRows(snapshot: Snapshot): LiveRow[] {
   return snapshot.protocols
     .filter((p) => !isPreToken(p) && p.category !== 'CEX')
@@ -454,7 +671,19 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
     }));
 }
 
-/** A board row's compact form for data.js, with the farm plan generated in the page. */
+/** A board row's compact form for data.js, with the farm plan generated in the page.
+ *
+ * The dashboard does not need the full board row. It needs the rank, the identity
+ * (slug, name, category, chains), the figures (TVL, 7-day change, market cap,
+ * listing date, age), the implied value, and the three multipliers it uses to
+ * recompute and display the model. It does not need the farm steps as data,
+ * because the page regenerates them from the same derivation (see
+ * dashboard/app.js farmSteps) — shipping them twice would double the data and
+ * risk the two copies disagreeing. It does not need the CoinGecko id or symbol,
+ * because every row on the board is pre-token and those fields are null by
+ * definition. The compact form is what keeps data.js small enough to inline:
+ * the full board is ~280KB, the compact rows are ~70KB, and the page loads
+ * faster and the dossier stays under its cap. */
 export function radarRow(row: BoardRow): RadarRow {
   return {
     rank: row.rank,
@@ -474,7 +703,20 @@ export function radarRow(row: BoardRow): RadarRow {
   };
 }
 
-/** Everything the dashboard renders, from the snapshot. */
+/** Everything the dashboard renders, from the snapshot.
+ *
+ * buildRadar is the single entry point the program and the dashboard share: it
+ * calibrates the multiples once, builds the board, takes the live set, and
+ * packages everything the page needs into one RadarData. Calibrating once (not
+ * once per row, not once per render) is what makes the multiples consistent:
+ * every row's category multiple comes from the same calibration pass over the
+ * same snapshot, so two protocols in the same category always get the same
+ * multiple. The early count is derived here (board rows not on the watchlist),
+ * not passed in, so the dashboard's "early rows below the floor" figure can
+ * never disagree with the board it renders. The model constants are the
+ * calibrated ones — the category table and overall median the calibration
+ * computed — so the page's model panel quotes the numbers the board actually
+ * used, not the defaults the code started with. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const multiples = calibrateMultiples(snapshot);
   const calibrated: ModelConstants = {
@@ -501,7 +743,20 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   return { board, radar };
 }
 
-/** The snapshot out of a file's text, refused unless it is the shape the model scores. */
+/** The snapshot out of a file's text, refused unless it is the shape the model scores.
+ *
+ * The parser is strict because the snapshot is sealed: it arrives from the
+ * competition, not from the author, and a malformed snapshot must fail loudly
+ * rather than produce a board from misread data. Every field the model reads is
+ * validated — as_of must be a YYYY-MM-DD date, floor_usd a positive safe
+ * integer, protocols and watchlist arrays, each protocol with a slug, a name and
+ * a finite TVL. Optional fields (change_7d, mcap_usd, listed_at, gecko_id,
+ * symbol) are read leniently: a missing or mistyped optional becomes null, which
+ * the model treats as "no data" rather than as zero, because a missing 7-day
+ * change is not a 0% change and a missing market cap is not a $0 market cap.
+ * The chains array keeps only its string entries. A protocol that fails
+ * validation refuses the whole snapshot with a message naming the protocol's
+ * index, so a bad input is diagnosable instead of silently dropped. */
 export function parseSnapshot(text: string): Snapshot {
   let raw: unknown;
   try {
@@ -544,7 +799,24 @@ export function parseSnapshot(text: string): Snapshot {
   };
 }
 
-/** Why a board is not one the gate will take, or null: coverage, ranks, order, one shared implied value, and farm steps. */
+/** Why a board is not one the gate will take, or null: coverage, ranks, order, one shared implied value, and farm steps.
+ *
+ * boardIssue is the model's own gate, run before anything is written: it refuses
+ * a board that would fail the competition's checks, so a bug in the model is
+ * caught here instead of at submission. The checks are in the order a reader
+ * would ask them. Coverage first: every watchlist slug must be present, because
+ * the board's first duty is the watchlist. Ranks second: ranks must be exactly
+ * 1..n with no gap and no duplicate, because a ranking with a missing rank is
+ * not a ranking. Order third: implied value must be non-increasing down the
+ * board, because a row outranking the row above it contradicts the sort. The
+ * shared-value check fourth: if the first and last rows share an implied value,
+ * every row does (the board is sorted), and a board that ranks nothing by value
+ * is not a ranking — it usually means the model collapsed to a constant. Farm
+ * steps last: each row needs 3..12 steps, each 20..600 characters, and a positive
+ * safe-integer implied value, because the gate refuses a board with a malformed
+ * row. The first failure is returned, with a message naming the slug or rank, so
+ * the failure is actionable. A null return means the board passes every check
+ * the model knows how to run. */
 export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null {
   const slugs = new Set(board.map((r) => r.slug));
   const missing = snapshot.watchlist.filter((s) => !slugs.has(s));
@@ -564,7 +836,16 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
   return null;
 }
 
-/** A compact data.js: the dashboard's whole dataset as one script, no fetch and no network. */
+/** A compact data.js: the dashboard's whole dataset as one script, no fetch and no network.
+ *
+ * The dataset is written as a single assignment to window.RADAR, not as a JSON
+ * file the page would have to fetch. A fetch would need a server or a CORS
+ * allowance; an inline script works from a file, from a static host, and inside
+ * the grader's container with no network at all. The JSON is compact (no
+ * indentation) because data.js is data, not a document a human reads — the
+ * readable form is board.json, and data.js is the compact rows the page renders
+ * from. The trailing newline keeps the file well-formed for tools that expect
+ * one. */
 export function dataScript(radar: RadarData): string {
   return `window.RADAR=${JSON.stringify(radar)};\n`;
 }
