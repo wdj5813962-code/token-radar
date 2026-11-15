@@ -1,14 +1,32 @@
 // A working token-radar-01 entry (Node 22, standard library only).
 //
-// The program reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores every
-// pre-token protocol with the model in lib/model.ts, writes the ranked board to /output/board.json, and
-// copies this repository's dashboard/ and screenshots/ to /output. Last, it writes /output/dossier.json,
-// the summary the judge reads, with the vendored make.fun library.
+// PIPELINE — what runs, in order, and why.
 //
-// The dashboard is a static page, no framework and no network: dashboard/index.html, dashboard/app.css
-// and dashboard/app.js read /output/data.js, which this program writes from the same board. A starting
-// point, not a winner: it covers the watchlist, states the model and gives every protocol a farm plan.
-// Change the model, the page or the plan; keep the gate's shape.
+//   1. Read the sealed snapshot (parseSnapshot). The snapshot is the only input:
+//      758 protocols, 40 watchlist slugs, a $50M floor, an as_of date. It is
+//      parsed strictly — a malformed snapshot fails loudly rather than producing
+//      a board from misread data — and its optional fields become null, not zero,
+//      so missing data is never mistaken for a zero value.
+//   2. Score it (buildRadar). One calibration pass derives every category's
+//      multiple from the snapshot's live-token protocols; the board is built
+//      (watchlist first, then the early radar below the floor); the rows are
+//      ranked by implied value with the slug as a deterministic tiebreak. The
+//      result is a board and the compact radar data the page renders from.
+//   3. Refuse a bad board (boardIssue). Before anything is written, the board is
+//      checked against the gate: watchlist coverage, ranks 1..n, non-increasing
+//      implied value, no shared value, well-formed farm steps. A board that
+//      fails is refused here, with a message naming the fault, instead of being
+//      submitted and refused there.
+//   4. Write the outputs. board.json (one row per line, inside the gate's
+//      100–4000 line window), data.js (the compact rows as a script, no fetch),
+//      dashboard/ (the static page), screenshots/ (the three views), and
+//      dossier.json last (the scorer rebuilds it from /output and compares
+//      bytes, so it must be written after everything it summarises).
+//
+// The program is deterministic: the same snapshot always produces the same
+// /output, byte for byte. No clock, no randomness, no network. The dashboard
+// recomputes each row from the same numbers and says whether its recomputation
+// matches board.json, so a stale dataset is visible instead of silent.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json

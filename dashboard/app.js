@@ -229,6 +229,19 @@
     );
   }
 
+  // The controls: search, category filter, and the pre-token / live-token tabs.
+  //
+  // Search matches the name, the slug, the category and the chains, all
+  // lowercased, so a reader can find a protocol by any of the words they know
+  // it by. The category filter lists every category present in the board,
+  // sorted, so the filter never offers a category with no rows. The two tabs
+  // switch between the ranked pre-token board and the live-token view; the
+  // live view is a separate table because its columns differ (market cap
+  // instead of implied value), and mixing the two into one table would confuse
+  // a modelled number with a market fact. Every control writes the hash, so a
+  // search, a filter or a tab is a shareable state, and the count beside the
+  // controls always says how many rows the current filter shows — the reader
+  // is never left wondering whether the filter hid rows or there were few.
   function controls() {
     var categories = Array.from(new Set(DATA.rows.map(function (r) { return r.category || 'Other'; }))).sort();
     var search = el('input', { type: 'search', id: 'q', placeholder: 'Search name, category or chain', value: state.q, 'aria-label': 'Search the board' });
@@ -423,6 +436,19 @@
     }
   }
 
+  // Render: rebuild the page from state, then open the detail drawer if one is selected.
+  //
+  // Render is a full rebuild, not a patch: it clears the board element and
+  // re-creates the header, the lede, the controls, the table and (for the
+  // pre-token tab) the model panel, from the current state. A full rebuild is
+  // simpler to reason about than a diff — there is no stale node to forget —
+  // and the board is 200 rows, small enough that rebuilding it on every
+  // keystroke is fast. The detail dialog is created once and reused: it is
+  // appended to the board on first render and kept connected, so opening a
+  // drawer does not recreate it. If the hash named a protocol (state.selected),
+  // render opens its drawer after building the table, so a shared detail link
+  // lands with the drawer open. Escape closes the drawer, and closing it
+  // clears the selection and the hash, so the URL always describes the view.
   function render() {
     app.textContent = '';
     var shell = el('div', { class: 'shell' });
