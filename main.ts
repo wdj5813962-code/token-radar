@@ -51,7 +51,10 @@ if (issue !== null) {
 }
 
 mkdirSync(out, { recursive: true });
-writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
+// One row per line: 200 rows stay inside the 100–4000 line window (a fully
+// indented dump is ~7200 lines and would fail the board's line cap).
+const boardText = `{\n  "rows": [\n${board.map((r) => `    ${JSON.stringify(r)}`).join(',\n')}\n  ]\n}\n`;
+writeFileSync(join(out, 'board.json'), boardText);
 writeFileSync(join(out, 'data.js'), dataScript(radar));
 
 /** Copy one directory's regular files into `to`, skipping names that start with a dot. */

@@ -243,7 +243,10 @@ export function impliedValue(
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const baseMultiple = multiples ? multipleFor(protocol.category, multiples) : model.base_multiple;
+  // Round the category multiple to 4 decimals before use: board.json stores the rounded value,
+  // and the dashboard recomputes from it, so the two must use the same number or the page
+  // reports a stale-data mismatch on rows whose TVL makes the rounding visible.
+  const baseMultiple = multiples ? round4(multipleFor(protocol.category, multiples)) : model.base_multiple;
   const base = protocol.tvl_usd * baseMultiple;
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
   return { implied, growthPct, growthMult, maturityMult, age, baseMultiple };
